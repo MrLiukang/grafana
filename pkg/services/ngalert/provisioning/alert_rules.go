@@ -262,12 +262,41 @@ func (service *AlertRuleService) CreateAlertRule(ctx context.Context, user ident
 	return rule, nil
 }
 
+// FilterOptions provides filtering for alert rule queries.
+// All fields are optional and will be applied as filters if provided.
+type FilterOptions struct {
+	ImportedPrometheusRule *bool
+	RuleGroups             []string
+	NamespaceUIDs          []string
+}
+
+func (opts *FilterOptions) apply(q models.ListAlertRulesQuery) models.ListAlertRulesQuery {
+	if opts == nil {
+		return q
+	}
+
+	if opts.ImportedPrometheusRule != nil {
+		q.ImportedPrometheusRule = opts.ImportedPrometheusRule
+	}
+
+	if len(opts.NamespaceUIDs) > 0 {
+		q.NamespaceUIDs = opts.NamespaceUIDs
+	}
+
+	if len(opts.RuleGroups) > 0 {
+		q.RuleGroups = opts.RuleGroups
+	}
+
+	return q
+}
+
 func (service *AlertRuleService) GetRuleGroup(ctx context.Context, user identity.Requester, namespaceUID, group string) (models.AlertRuleGroup, error) {
 	q := models.ListAlertRulesQuery{
 		OrgID:         user.GetOrgID(),
 		NamespaceUIDs: []string{namespaceUID},
 		RuleGroups:    []string{group},
 	}
+
 	ruleList, err := service.ruleStore.ListAlertRules(ctx, &q)
 	if err != nil {
 		return models.AlertRuleGroup{}, err
@@ -366,6 +395,16 @@ func (service *AlertRuleService) UpdateRuleGroup(ctx context.Context, user ident
 func (service *AlertRuleService) ReplaceRuleGroup(ctx context.Context, user identity.Requester, group models.AlertRuleGroup, provenance models.Provenance) error {
 	if err := models.ValidateRuleGroupInterval(group.Interval, service.baseIntervalSeconds); err != nil {
 		return err
+	}
+
+	for _, rule := range group.Rules {
+		if rule.UID == "" {
+			// if empty the UID will be generated before save
+			continue
+		}
+		if err := util.ValidateUID(rule.UID); err != nil {
+			return fmt.Errorf("%w: cannot create rule with UID %q: %w", models.ErrAlertRuleFailedValidation, rule.UID, err)
+		}
 	}
 
 	delta, err := service.calcDelta(ctx, user, group)
@@ -575,6 +614,10 @@ func (service *AlertRuleService) UpdateAlertRule(ctx context.Context, user ident
 			// No changes to the rule.
 			return rule, nil
 		}
+		// new rules not allowed in update for a single rule
+		if len(delta.New) > 0 {
+			return models.AlertRule{}, fmt.Errorf("failed to update rule with UID %s because %w", rule.UID, models.ErrAlertRuleNotFound)
+		}
 		for _, d := range delta.Update {
 			if d.Existing.GetKey() == rule.GetKey() {
 				storedRule = d.Existing
@@ -734,15 +777,17 @@ func (service *AlertRuleService) GetAlertRuleGroupWithFolderFullpath(ctx context
 	return res, nil
 }
 
-// GetAlertGroupsWithFolderFullpath returns all groups with folder's full path in the folders identified by folderUID that have at least one alert. If argument folderUIDs is nil or empty - returns groups in all folders.
-func (service *AlertRuleService) GetAlertGroupsWithFolderFullpath(ctx context.Context, user identity.Requester, folderUIDs []string) ([]models.AlertRuleGroupWithFolderFullpath, error) {
+// GetAlertGroupsWithFolderFullpath returns all groups that have at least one alert with the full folder path for each group.
+
+// It queries all alert rules for the user's organization, applies optional filtering specified in filterOpts,
+// and groups the rules by groups. The function then fetches folder details (including the full path)
+// for each namespace (folder UID) associated with the rule groups. If the user lacks blanket read permissions,
+// only the groups that the user is authorized to view are returned.
+func (service *AlertRuleService) GetAlertGroupsWithFolderFullpath(ctx context.Context, user identity.Requester, filterOpts *FilterOptions) ([]models.AlertRuleGroupWithFolderFullpath, error) {
 	q := models.ListAlertRulesQuery{
 		OrgID: user.GetOrgID(),
 	}
-
-	if len(folderUIDs) > 0 {
-		q.NamespaceUIDs = folderUIDs
-	}
+	q = filterOpts.apply(q)
 
 	ruleList, err := service.ruleStore.ListAlertRules(ctx, &q)
 	if err != nil {
@@ -817,6 +862,7 @@ func syncGroupRuleFields(group *models.AlertRuleGroup, orgID int64) *models.Aler
 		group.Rules[i].RuleGroup = group.Title
 		group.Rules[i].NamespaceUID = group.FolderUID
 		group.Rules[i].OrgID = orgID
+		group.Rules[i].RuleGroupIndex = i
 	}
 	return group
 }
