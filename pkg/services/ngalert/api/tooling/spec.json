@@ -1633,6 +1633,12 @@
             "schema": {
               "$ref": "#/definitions/ForbiddenError"
             }
+          },
+          "404": {
+            "description": "NotFound",
+            "schema": {
+              "$ref": "#/definitions/NotFound"
+            }
           }
         }
       },
@@ -8380,7 +8386,6 @@
       }
     },
     "alertGroups": {
-      "description": "AlertGroups alert groups",
       "type": "array",
       "items": {
         "type": "object",
